@@ -130,7 +130,7 @@
 
   const KEYWORDS = /segment|segmental|reportable segment|operating segment|single (reportable|operating) segment|one (reportable|operating) segment|net (sales|revenue)|total net (sales|revenue)|net turnover|turnover|total income|business unit|naics|revenue by (segment|category|division|product)|product categor|revenue stream|disaggregat|consolidated statements? of (operations|income)|consolidated income statement|total revenue|corporate.{0,10}(eliminations|other|unallocated)|divisional (performance|results|revenue)|by (division|category|reportable segment|product)|divestiture|disposal|discontinued operation|acquisition|restructur|rebrand|renamed|strategic review|spin-off|spinoff|significant events|key developments|sustainab|\bESG\b|net zero|net-zero|carbon neutral|emissions? (target|reduction|goal)|MSCI|CDP\b|sustainalytics|board (composition|diversity)|governance|materiality|controvers/i;
   const HIGH_PRIORITY_KEYWORDS = /consolidated statements? of operations|consolidated income statement|consolidated statements? of income|total (net )?revenue/i;
-  const DEFAULT_MODEL = "gemini-2.5-flash-lite"; // testing for cost: ~$0.10/$0.40 per 1M tokens, ~15x cheaper than 3.5 Flash. Note: standard (non-Lite) gemini-2.5-flash is retired for new usage — Lite is the viable cheap option. Check ai.google.dev/gemini-api/docs/models if this also becomes stale.
+  const DEFAULT_MODEL = "gemini-3.1-flash-lite"; // gemini-2.5-flash-lite and gemini-2.5-flash are both retired for new usage. 3.1 Flash-Lite (~$0.25/$1.50 per 1M tokens) is the current cheap tier. Check ai.google.dev/gemini-api/docs/models if this also becomes stale.
 
   // Monthly usage quota — a soft per-browser limit, not a hard security boundary (someone could clear
   // localStorage to reset it), but it protects the shared key's budget from accidental overuse across
@@ -204,7 +204,7 @@
       if (block.type === "text") return { text: block.text };
       if (block.type === "image_url") {
         const dataUrl = block.image_url.url; // "data:image/png;base64,XXXX"
-        return { inline_data: { mime_type: "image/png", data: dataUrl.split(",")[1] } };
+        return { inline_data: { mime_type: "image/jpeg", data: dataUrl.split(",")[1] } };
       }
       return null;
     }).filter(Boolean);
@@ -385,8 +385,11 @@ RULES:
     const canvas = document.createElement("canvas");
     canvas.width = viewport.width; canvas.height = viewport.height;
     const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#FFFFFF"; ctx.fillRect(0, 0, canvas.width, canvas.height); // JPEG has no transparency — white background first
     await page.render({ canvasContext: ctx, viewport }).promise;
-    return canvas.toDataURL("image/png").split(",")[1];
+    // JPEG at 0.85 quality is far smaller than PNG for a rendered page — this is what actually fixes the
+    // "413 Request Entity Too Large" error, since Vercel caps request body size regardless of image count.
+    return canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
   }
 
   function mergeSegmentEntry(existing, incoming) {
@@ -463,7 +466,7 @@ RULES:
       log(company, `Found ${selected.length} relevant page(s) out of ${total}: ${selected.join(", ")}`);
 
       const readBatches = async (pages, label) => {
-        const batchSize = 6;
+        const batchSize = 4; // reduced from 6 — combined with JPEG compression, keeps well under Vercel's request size limit
         let m = null;
         for (let i = 0; i < pages.length; i += batchSize) {
           const batchPages = pages.slice(i, i + batchSize);
