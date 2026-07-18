@@ -130,7 +130,7 @@
 
   const KEYWORDS = /segment|segmental|reportable segment|operating segment|single (reportable|operating) segment|one (reportable|operating) segment|net (sales|revenue)|total net (sales|revenue)|net turnover|turnover|total income|business unit|naics|revenue by (segment|category|division|product)|product categor|revenue stream|disaggregat|consolidated statements? of (operations|income)|consolidated income statement|total revenue|corporate.{0,10}(eliminations|other|unallocated)|divisional (performance|results|revenue)|by (division|category|reportable segment|product)|divestiture|disposal|discontinued operation|acquisition|restructur|rebrand|renamed|strategic review|spin-off|spinoff|significant events|key developments/i;
   const HIGH_PRIORITY_KEYWORDS = /consolidated statements? of operations|consolidated income statement|consolidated statements? of income|total (net )?revenue/i;
-  const DEFAULT_MODEL = "gemini-2.5-flash"; // strong on tables/charts, cheap. Check aistudio.google.com for current model names/pricing.
+  const DEFAULT_MODEL = "gemini-3.5-flash"; // gemini-2.5-flash was retired for new usage — check ai.google.dev/gemini-api/docs/models if this also becomes stale.
 
   let idCounter = 1;
   let state = { companies: [] };
@@ -161,8 +161,21 @@
     }).filter(Boolean);
   }
 
+  // Global rate limiter — spaces out every API call regardless of which function triggered it
+  // (extraction batches, mapping, GICS sector, retries). Set conservatively for a free-tier key
+  // limited to ~5 requests/minute; reduce via the settings panel if the key ever gets billing enabled.
+  let lastCallAt = 0;
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+  async function rateLimitWait() {
+    const minInterval = parseInt(localStorage.getItem("rate_limit_ms") || "13000", 10);
+    const wait = minInterval - (Date.now() - lastCallAt);
+    if (wait > 0) await sleep(wait);
+    lastCallAt = Date.now();
+  }
+
   async function callClaude(system, content, opts) {
     opts = opts || {};
+    await rateLimitWait();
     const model = localStorage.getItem("gemini_model") || DEFAULT_MODEL;
     const overrideKey = localStorage.getItem("gemini_api_key"); // optional — blank uses the server's shared key
     const body = {
@@ -181,7 +194,13 @@
       headers: { "Content-Type":"application/json" },
       body: JSON.stringify(body)
     });
-    const data = await res.json();
+    const rawText = await res.text();
+    let data;
+    try {
+      data = JSON.parse(rawText);
+    } catch (parseErr) {
+      throw new Error(`Backend at /api/gemini didn't return JSON (status ${res.status}). This usually means the serverless function isn't deployed where Vercel expects it — check your repo's folder structure or Vercel's Root Directory setting. Response started with: "${rawText.slice(0,80)}"`);
+    }
     if (!res.ok) throw new Error("API error: " + (data.error && data.error.message ? data.error.message : res.status));
     const parts = (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts) || [];
     const text = parts.map(p => p.text || "").join("");
@@ -643,6 +662,12 @@ RULES:
         <input type="checkbox" id="webLookupToggle" ${localStorage.getItem("web_lookup_enabled")==="true"?"checked":""} style="width:auto;" />
         Use web search to fill gaps when a segment's product list is sparse in the filing (uses Gemini's built-in Google Search grounding — cites the link used)
       </label>
+      <div class="label" style="margin-top:14px;">Delay between API calls (ms)</div>
+      <p style="font-size:11px;color:var(--muted2);margin:0 0 6px;">
+        Defaults to 13000ms (~5 calls/minute) to match a free-tier key's rate limit. If this key gets billing enabled,
+        lower this (e.g. 500) for much faster processing.
+      </p>
+      <input type="number" id="rateLimitIn" value="${localStorage.getItem("rate_limit_ms") || "13000"}" min="0" step="500" />
     `;
     let keyVisible = false;
     el("toggleKeyVis").addEventListener("click", () => {
@@ -651,6 +676,7 @@ RULES:
     });
     el("apiKeyIn").type = "password"; // masked by default; the eye toggle above reveals it on demand
     el("webLookupToggle").addEventListener("change", (e) => localStorage.setItem("web_lookup_enabled", e.target.checked ? "true" : "false"));
+    el("rateLimitIn").addEventListener("change", (e) => localStorage.setItem("rate_limit_ms", String(Math.max(0, parseInt(e.target.value,10) || 0))));
     el("saveKeyBtn").addEventListener("click", () => {
       const val = el("apiKeyIn").value.trim();
       const modelVal = el("modelIdIn").value.trim();
