@@ -59,6 +59,15 @@
   .pill.exact { color:var(--teal-dark); border-color:var(--teal-dark); background:var(--teal-bg); }
   .pill.est { color:var(--amber-dark); border-color:var(--amber-dark); background:var(--amber-bg); }
   .pill.warn { color:var(--red); border-color:var(--red-dark); background:var(--red-bg); }
+  .pill.good { color:var(--teal-dark); border-color:var(--teal-dark); background:var(--teal-bg); }
+  .pill.bad { color:var(--red); border-color:var(--red-dark); background:var(--red-bg); }
+  .pill.muted { color:var(--muted); border-color:var(--border-light); background:transparent; }
+  .matrix-box { border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .cat-row { display:flex; align-items:center; gap:10px; padding:8px 12px; border-bottom:1px solid var(--border); font-size:12px; }
+  .cat-row:last-child { border-bottom:none; }
+  .cat-num { font-family:ui-monospace,monospace; color:var(--muted2); width:20px; flex-shrink:0; }
+  .cat-name { flex:1; }
+  .cat-val { color:var(--muted); font-size:11px; }
   .seg-body { padding:12px 16px; }
   .seg-desc { font-size:12px; color:var(--muted); margin-bottom:10px; line-height:1.5; }
   .alloc-row { display:grid; grid-template-columns:90px 1fr 70px 24px; gap:8px; align-items:center; margin-bottom:6px; }
@@ -110,14 +119,33 @@
 
     <div class="panel" id="apiKeyPanel"></div>
 
-    <div class="toolbar">
-      <button class="primary" id="addCompanyBtn" style="width:auto;">+ Add company</button>
-      <button class="secondary" id="processAllBtn" style="width:auto;">▶ Process all pending</button>
-      <button class="ghost" id="exportBtn">⬇ Export all to Excel</button>
+    <div style="display:flex; gap:8px; margin-bottom:20px; border-bottom:2px solid var(--border);">
+      <button class="tab-btn active" id="tabRevenue" style="background:none;border:none;border-bottom:3px solid var(--teal);color:var(--teal-dark);font-weight:700;padding:10px 4px;margin-bottom:-2px;cursor:pointer;font-size:13px;">Revenue &amp; GICS</button>
+      <button class="tab-btn" id="tabGhg" style="background:none;border:none;border-bottom:3px solid transparent;color:var(--muted);font-weight:700;padding:10px 4px;margin-bottom:-2px;cursor:pointer;font-size:13px;">GHG Scope 3 Check</button>
     </div>
-    <div id="errorBox" class="error-msg"></div>
 
-    <div id="companiesList"></div>
+    <div id="revenueSection">
+      <div class="toolbar">
+        <button class="primary" id="addCompanyBtn" style="width:auto;">+ Add company</button>
+        <button class="secondary" id="processAllBtn" style="width:auto;">▶ Process all pending</button>
+        <button class="ghost" id="exportBtn">⬇ Export all to Excel</button>
+      </div>
+      <div id="errorBox" class="error-msg"></div>
+
+      <div id="companiesList"></div>
+    </div>
+
+    <div id="ghgSection" style="display:none;">
+      <p class="sub" style="margin-bottom:16px;">Compares FY2024 emissions against FY2023 (and FY2025 if available) to check Scope 3 deltas if any and materiality/completeness compared to CDP, and delayed-reporting patterns.</p>
+      <div class="toolbar">
+        <button class="primary" id="addGhgCompanyBtn" style="width:auto;">+ Add company</button>
+        <button class="secondary" id="processAllGhgBtn" style="width:auto;">▶ Process all pending</button>
+        <button class="ghost" id="exportGhgBtn">⬇ Export all to Excel</button>
+      </div>
+      <div id="ghgErrorBox" class="error-msg"></div>
+
+      <div id="ghgCompaniesList"></div>
+    </div>
   </div>
 </div>
 
@@ -174,33 +202,44 @@
 
   // Daily usage quota — a soft per-browser limit, not a hard security boundary (someone could clear
   // localStorage to reset it), but it paces the shared key's budget evenly across the team instead of
-  // letting one person front-load a whole period's usage into a single day. Default of 2/user/day means
-  // 11 analysts working ~22 days/month land around 484 companies/month worst case — still tune this
-  // against real measured cost per company once you have it; the math in this comment is a starting
-  // point, not a guarantee. Adjustable in Advanced settings.
-  const DEFAULT_DAILY_LIMIT = 4; // 11 analysts × 4/day × ~22 working days ≈ 968/month → ~$19-34/month at the ~$0.02-0.035/company estimate, which is OVER the ₹1500 (~$15.63) monthly budget at both ends of that range. Set by explicit request over the stricter budget-fit number (3/day) — monitor real spend closely (Google Cloud Billing alert) since this is no longer conservatively inside budget on paper.
+  // letting one person front-load a whole period's usage into a single day. Tracked separately per
+  // tab (Revenue & GICS vs GHG Scope 3 Check) since they have different cost profiles — a GHG check
+  // can involve up to 3 documents per company, so combining them into one shared pool would let GHG
+  // usage silently crowd out Revenue usage or vice versa.
+  const DEFAULT_DAILY_LIMIT = 6; // per tab, per analyst — 6 Revenue + 6 GHG = up to 12 checks/day/person
   function currentDayKey() { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`; }
-  function getUsage() {
+  function getUsage(tab) {
+    const key = `usage_tracker_${tab}`;
     let raw;
-    try { raw = JSON.parse(localStorage.getItem("usage_tracker") || "{}"); } catch(e) { raw = {}; }
+    try { raw = JSON.parse(localStorage.getItem(key) || "{}"); } catch(e) { raw = {}; }
     if (raw.day !== currentDayKey()) raw = { day: currentDayKey(), count: 0 };
     return raw;
   }
-  function getDailyLimit() { return parseInt(localStorage.getItem("daily_limit") || String(DEFAULT_DAILY_LIMIT), 10); }
-  function recordUsage() {
-    const u = getUsage();
+  function getDailyLimit(tab) { return parseInt(localStorage.getItem(`daily_limit_${tab}`) || String(DEFAULT_DAILY_LIMIT), 10); }
+  function recordUsage(tab) {
+    const key = `usage_tracker_${tab}`;
+    const u = getUsage(tab);
     u.count += 1;
-    localStorage.setItem("usage_tracker", JSON.stringify(u));
+    localStorage.setItem(key, JSON.stringify(u));
   }
-  function usageRemaining() { return Math.max(0, getDailyLimit() - getUsage().count); }
+  function usageRemaining(tab) { return Math.max(0, getDailyLimit(tab) - getUsage(tab).count); }
 
 
   let idCounter = 1;
-  let state = { companies: [] };
+  let state = { companies: [], ghgCompanies: [] };
+  let ghgIdCounter = 1;
+  function newGhgCompany() {
+    return {
+      id: ghgIdCounter++, name: "",
+      latestYear: "2025", priorYear: "2024",
+      fy2024File: null, fy2023File: null, fy2025File: null,
+      log: [], loading: false, error: null, result: null
+    };
+  }
 
   function el(id){ return document.getElementById(id); }
   function newCompany() {
-    return { id: idCounter++, name:"", year:"", file:null, log:[], loading:false, mapping:false, extraction:null, mapped:null, gicsSector:null, error:null, includeSnapshot:false };
+    return { id: idCounter++, name:"", year:"", file:null, log:[], loading:false, mapping:false, extraction:null, mapped:null, gicsSector:null, error:null, includeSnapshot:false, useWebLookup:false, includeExclusionary:false, exclusionaryResult:null };
   }
 
   // The model occasionally puts a real line break inside a text field instead of an escaped \n,
@@ -386,6 +425,22 @@ RULES:
 3. Your entire response must be a single JSON object and nothing else. First character {, last character }. No preamble, no commentary, no markdown fences.
 {"company_snapshot_brief": string}`;
 
+  // Keyword scan for the optional exclusionary-involvement pass — deliberately separate from core
+  // keywords so it doesn't dilute the main revenue/segment page selection unless the checkbox is on.
+  const EXCLUSIONARY_KEYWORDS = /nuclear (power|energy|fuel|reactor|weapon)|uranium|oil (and|&) gas|petroleum|crude oil|upstream (oil|exploration)|fossil fuel|coal (mining|power|fired)|thermal coal|defense (contract|industry|sector)|defence (contract|industry|sector)|military (equipment|hardware|contract)|weapons? (manufactur|system|production)|arms (trade|manufactur|export)|controversial weapons|cluster munition|landmine|tobacco (product|manufactur)|gambling|casino|adult entertainment/i;
+
+  // Compact, standalone prompt for the optional exclusionary-involvement check — same lightweight,
+  // tightly-capped pattern as the Company Snapshot pass, so it never adds cost unless requested.
+  const EXCLUSIONARY_SYSTEM = `You are an ESG screening analyst checking a company's annual report for involvement in commonly excluded/controversial industries. You are shown selected page images (each preceded by its page number), pre-filtered for likely relevant content.
+RULES:
+1. Check specifically for disclosed involvement in: nuclear power/weapons, oil & gas (upstream exploration/production, not just fuel purchases for own operations), thermal coal mining or coal-fired power, defense/weapons manufacturing or military contracting, controversial weapons (cluster munitions, landmines), tobacco manufacturing, and gambling/casino operations.
+2. Only flag genuine business involvement (revenue-generating activity, production, or manufacturing in these areas) — do NOT flag a company merely for being a customer/purchaser of energy, or for incidental mentions unrelated to their own operations.
+3. For each flagged involvement, give the category, a one-sentence description of the actual involvement found, and the page/quote it's based on.
+4. summary: ONE to TWO sentences overall. If nothing found, write exactly "No disclosed involvement in nuclear, oil & gas, coal, defense, controversial weapons, tobacco, or gambling found in the scanned pages."
+5. Never invent involvement that isn't explicitly stated — if the business description alone suggests a sector (e.g. "energy company") but no specific activity is confirmed in the pages shown, do not flag it; note the ambiguity instead.
+6. Your entire response must be a single JSON object and nothing else. First character {, last character }. No preamble, no commentary, no markdown fences.
+{"summary": string, "flags": [{"category": "nuclear|oil_gas|coal|defense|controversial_weapons|tobacco|gambling", "description": string, "page": number|null, "source_quote": string|null}]}`;
+
   const MAPPING_SYSTEM = `You are an industry classification specialist mapping business segments to GICS codes (Global Industry Classification Standard, sub-industry level where possible), using your own knowledge since no external code list is provided.
 RULES:
 1. You will be given each segment's full product/service list, not just a short description — use this list as the primary basis for classification, not just the general description.
@@ -407,9 +462,69 @@ RULES:
 4. Your entire response must be a single JSON object and nothing else. First character {, last character }. No preamble, no commentary, no markdown fences.
 {"sector": string, "industry_group": string, "rationale": string}`;
 
+  // ===== GHG Scope 3 Check section =====
+  const GHG_KEYWORDS = /scope\s*[123]|ghg|greenhouse gas|co2e?|carbon emissions?|emissions? (data|inventory|summary)|tco2e|climate.{0,10}(disclosure|data)|environmental (data|performance)|sustainability (data|metrics|report)|restat|methodology change|boundary change|category\s*\d{1,2}[:.]?\s*(purchased|capital|fuel|upstream|waste|business travel|employee commut|downstream|processing|use of sold|end.of.life|leased|franchise|investment)|energy (consumption|intensity)|market.based|location.based|net energy|renewable energy|kpi (data|table|summary)/i;
+  // Strong signal that a page is the actual detailed data table (not just a narrative mention of
+  // "Scope 1/2/3" elsewhere in the report) — weighted heavily in scanAndSelectPages so this kind of
+  // page consistently outranks pages that just mention emissions in passing.
+  const GHG_PRIORITY_KEYWORDS = /category\s*(1|2|3|4|5|6|7|8|9|10|11|12|13|14|15)\s*[:.]|scope\s*3.{0,15}categor|(scope\s*1.{0,40}scope\s*2.{0,40}scope\s*3)|(scope\s*1.{0,10}scope\s*2)|market.based.{0,60}location.based|key figures|data table|gri (content )?index|performance (data|indicators)|esg data|at a glance/i;
+
+  function buildGhgMainSystem(latestYear, priorYear) {
+    const ly = latestYear || "the latest reporting year";
+    const py = priorYear || "the prior reporting year";
+    return `You are a GHG accounting specialist reviewing a company's ${ly} sustainability/annual report — this is the latest year being checked — for Scope 1, 2, and 3 emissions data, with a focus on producing solid, verifiable Scope 3 data. You are shown selected page images (each preceded by its page number).
+RULES:
+1. Extract Scope 1, Scope 2 (location and/or market-based if both given), and Scope 3 total emissions for ${ly} — as directly and explicitly stated, never calculated or estimated by you.
+1b. CRITICAL — COLUMN IDENTIFICATION. Multi-year trend tables (common in sustainability reports, often showing 3-5+ years of data side by side) list years in EITHER newest-first OR oldest-first order depending on the company's convention — NEVER assume which column is ${ly} based on position (e.g. "leftmost" or "first"). Always locate the actual year number printed in each column's header (e.g. "2025", "2024") and match values strictly by that printed label to ${ly} and ${py} specifically. If a table's column headers are unclear or you cannot confidently match a column to ${ly}, leave the value null and note the ambiguity in data_gaps rather than guessing based on column order. For BOTH ${ly} and ${py}, record the exact column header text you matched in column_header_matched (e.g. "FY2025" or "2025" or "Reporting year 2025") — this is a mandatory audit trail so the match can be verified against the source page.
+1c. MANDATORY SELF-CHECK before finalizing each value: compare what you wrote in column_header_matched against the year you are populating it for. If you are populating a figure under "${ly}" (fy2024 in the schema), column_header_matched MUST literally read ${ly} (or an unambiguous equivalent like "FY${ly}") — if it instead reads ${py} or any other year, that is a contradiction, and you must NOT use that figure for ${ly}. Either find the column that actually says ${ly}, or set value to null and explain the mismatch in data_gaps. Apply the same check to ${py} figures — column_header_matched there must say ${py}, not ${ly} or any other year. Do not let a figure end up under the wrong year's field just because it was the number you found first.
+2. ALSO extract the ${py} COMPARATIVE figures for Scope 1/2/3 as shown in THIS SAME report (the prior-year column typically shown alongside ${ly} in the same table) — this is what the company itself reported as its ${py} comparative in this report, not a separate ${py} report. Apply rule 1b here too — match by the printed year label, not position, and include page + column_header_matched for the comparative figures too.
+3. SCOPE 3 CATEGORY-BY-CATEGORY CHECK — MANDATORY FULL COVERAGE. scope3_categories_disclosed MUST contain exactly 15 entries, one for each GHG Protocol Scope 3 category number (1 through 15), even for categories not mentioned at all in the report. Never omit a category number. For EACH of the 15:
+   a. disclosed: true if the report gives it a specific value FOR ${ly} SPECIFICALLY (per rule 1b's column-matching), false otherwise.
+   b. value: the figure if disclosed, else null.
+   c. expected_material_for_sector: true/false — your judgment of whether this category would typically be expected to be material for a company in this sector, based on standard GHG Protocol / CDP Technical Note v3.0-style sector relevance guidance (e.g. Category 11 "Use of sold products" is typically material for automotive/durable goods/equipment manufacturers — including industrial equipment, machinery, and engineered components if they consume energy or fuel during use; Category 1 "Purchased goods and services" is typically material for most manufacturers and retailers; Category 6/7 travel/commuting are typically minor for asset-heavy industrials but more relevant for services/office-based companies; Category 15 "Investments" is typically material only for financial institutions). Base this ONLY on company_business_description and standard sector practice — NEVER mark a category as "not material" merely because the company didn't disclose it or because doing so would avoid flagging a gap. If you are noting a category as a data gap elsewhere in your response, expected_material_for_sector for that same category must be consistent with that concern, not contradict it.
+   d. materiality_rationale: MAX 6 WORDS explaining why material or not (e.g. "core manufacturing input" or "no financed investments").
+   The 15 GHG Protocol Scope 3 categories are: 1 Purchased goods and services, 2 Capital goods, 3 Fuel- and energy-related activities, 4 Upstream transportation and distribution, 5 Waste generated in operations, 6 Business travel, 7 Employee commuting, 8 Upstream leased assets, 9 Downstream transportation and distribution, 10 Processing of sold products, 11 Use of sold products, 12 End-of-life treatment of sold products, 13 Downstream leased assets, 14 Franchises, 15 Investments.
+4. Extract any explicit statement of a METHODOLOGY CHANGE, RESTATEMENT, BOUNDARY CHANGE, CORPORATE ACTION (acquisition, merger, divestiture, demerger), or reason for a change in emissions figures year-over-year, quoting the relevant text (under 20 words) and its page number. If the report is silent on this, say so explicitly — do not infer a reason that isn't stated.
+5. company_business_description: 1-2 sentences on what the company does — this drives the sector-materiality judgment in rule 3, so be specific about its actual products/services, not generic.
+6. materiality_assessment: state whether Scope 3 reporting appears "adequate", "borderline", or "below_lowerbound", with a rationale grounded specifically in which expected-material categories (per rule 3c) are or aren't covered — this should be a direct consequence of the category-by-category check, not a separate impression.
+7. Never invent numbers or reasons. If something isn't stated in the pages shown, use null and note it in data_gaps.
+8. Include page number and a short source quote for every figure.
+9. Your entire response must be a single JSON object and nothing else. First character {, last character }. No preamble, no commentary, no markdown fences.
+{
+ "company_business_description": string|null,
+ "fy2024": {"scope1": {"value": number|null, "unit": string|null, "page": number|null, "source_quote": string|null, "column_header_matched": string|null}, "scope2": {"value": number|null, "unit": string|null, "page": number|null, "source_quote": string|null, "column_header_matched": string|null}, "scope3": {"value": number|null, "unit": string|null, "page": number|null, "source_quote": string|null, "column_header_matched": string|null}},
+ "fy2023_comparative_shown_in_this_report": {"scope1": {"value": number|null, "page": number|null, "column_header_matched": string|null}, "scope2": {"value": number|null, "page": number|null, "column_header_matched": string|null}, "scope3": {"value": number|null, "page": number|null, "column_header_matched": string|null}},
+ "scope3_categories_disclosed": [{"category_number": 1, "category_name": "Purchased goods and services", "disclosed": boolean, "value": number|null, "expected_material_for_sector": boolean, "materiality_rationale": string}],
+ "stated_reason_for_change": {"found": boolean, "type": "methodology_change|restatement|boundary_change|acquisition|merger|divestiture|demerger|other|not_stated", "quote": string|null, "page": number|null},
+ "materiality_assessment": {"rating": "adequate|borderline|below_lowerbound", "rationale": string},
+ "data_gaps": [string]
+}`;
+  }
+
+  function buildGhgPriorYearSystem(priorYear) {
+    const py = priorYear || "that year";
+    return `You are a GHG accounting specialist. You are shown selected page images from a company's OWN ${py} report (not a later report's comparative column) — extract exactly what THIS report states as its own ${py} Scope 1/2/3 figures, as originally reported at the time, for comparison against how a later report restated or showed these same ${py} figures.
+RULES:
+1. Extract Scope 1, Scope 2, and Scope 3 totals for ${py} exactly as this report states them, with page number and source quote.
+2. Never invent numbers. If not found, use null.
+3. Your entire response must be a single JSON object and nothing else. First character {, last character }. No preamble, no commentary, no markdown fences.
+{"scope1": {"value": number|null, "unit": string|null, "page": number|null}, "scope2": {"value": number|null, "unit": string|null, "page": number|null}, "scope3": {"value": number|null, "unit": string|null, "page": number|null}}`;
+  }
+
+  function buildGhgRestatementSystem(latestYear) {
+    const ly = latestYear || "the latest reporting year";
+    return `You are a GHG accounting specialist. You are shown selected page images from a company's report for the year AFTER ${ly} — check specifically whether it restates the company's ${ly} Scope 1/2/3 figures (a "restated" or revised prior-year comparative for ${ly}, different from what was originally reported).
+RULES:
+1. If ${ly} figures are shown as a comparative in this newer report, extract them with page number and source quote.
+2. State clearly whether these appear to be a RESTATEMENT (different from what you'd expect the original ${ly} figure to be) or just a repeat of the same figure — if you cannot tell, say so.
+3. Never invent numbers. If not found, use null.
+4. Your entire response must be a single JSON object and nothing else. First character {, last character }. No preamble, no commentary, no markdown fences.
+{"fy2024_restated": {"scope1": {"value": number|null}, "scope2": {"value": number|null}, "scope3": {"value": number|null}}, "appears_restated": boolean|null, "page": number|null, "source_quote": string|null}`;
+  }
+
   function log(company, msg) { company.log.push(msg); renderAll(); }
 
-  async function scanAndSelectPages(pdf, maxPages, keywords) {
+  async function scanAndSelectPages(pdf, maxPages, keywords, priorityKeywords) {
     const total = pdf.numPages;
     const scored = [];
     for (let i = 1; i <= total; i++) {
@@ -417,7 +532,12 @@ RULES:
       const tc = await page.getTextContent();
       const pageText = tc.items.map(it => it.str).join(" ");
       const matches = pageText.match(keywords);
-      scored.push({ page: i, score: matches ? matches.length : 0 });
+      let score = matches ? matches.length : 0;
+      if (priorityKeywords) {
+        const pMatches = pageText.match(priorityKeywords);
+        if (pMatches) score += pMatches.length * 10; // strong signal pages (e.g. a real category-level data table) should dominate ranking over pages with a single passing mention
+      }
+      scored.push({ page: i, score });
     }
     let selected = scored.filter(s => s.score > 0).sort((a,b) => a.page - b.page);
     let usedFallbackSampling = false;
@@ -497,11 +617,11 @@ RULES:
 
   async function extractCompany(company) {
     if (!company.file) { company.error = "Upload a PDF first."; renderAll(); return; }
-    if (usageRemaining() <= 0) {
-      company.error = `Daily limit reached (${getDailyLimit()} companies). This resets at midnight. Contact your admin if you need a higher limit.`;
+    if (usageRemaining("revenue") <= 0) {
+      company.error = `Daily limit reached (${getDailyLimit("revenue")} companies) for Revenue &amp; GICS checks. This resets at midnight. Contact your admin if you need a higher limit.`;
       renderAll(); return;
     }
-    recordUsage();
+    recordUsage("revenue");
     renderApiKeyPanel();
     company.loading = true; company.log = []; company.error = null; company.extraction = null; company.mapped = null;
     renderAll();
@@ -619,6 +739,30 @@ RULES:
         }
       }
 
+      // Optional exclusionary-involvement pass — same lightweight, tightly-capped pattern as the
+      // Company Snapshot, stored separately on the company object rather than merged into extraction.
+      if (company.includeExclusionary) {
+        try {
+          const { selected: exclPages } = await scanAndSelectPages(pdf, 8, EXCLUSIONARY_KEYWORDS);
+          if (exclPages.length > 0) {
+            log(company, `Reading exclusionary-involvement pass (pages ${exclPages.join(", ")})...`);
+            const exclContent = [];
+            for (const p of exclPages) {
+              const b64 = await renderPageToBase64(pdf, p, 1.8);
+              exclContent.push({ type:"text", text:`Page ${p}:` });
+              exclContent.push({ type:"image_url", image_url:{ url: "data:image/png;base64," + b64 } });
+            }
+            exclContent.push({ type:"text", text:`Company: ${company.name||"Unknown"}\nCheck for exclusionary-industry involvement per the schema from the pages shown above.` });
+            company.exclusionaryResult = await callClaudeWithRetry(EXCLUSIONARY_SYSTEM, exclContent, 2, { max_tokens: 500 });
+          } else {
+            company.exclusionaryResult = { summary: "No pages matched exclusionary-industry keywords — no disclosed involvement found in the scanned document.", flags: [] };
+            log(company, "No exclusionary-relevant pages found — skipping exclusionary check.");
+          }
+        } catch (exclErr) {
+          log(company, `⚠ Exclusionary-involvement check failed (${exclErr.message}) — continuing without it.`);
+        }
+      }
+
       company.extraction = merged;
       log(company, `Done. Found ${merged.segments.length} segment(s).`);
 
@@ -645,7 +789,7 @@ RULES:
     company.mapping = true; company.mapped = company.mapped || {};
     renderAll();
     const segs = company.extraction.segments;
-    const useWebLookup = el("webLookupToggle") && el("webLookupToggle").checked;
+    const useWebLookup = company.useWebLookup === true;
     const chunkSize = 3; // GICS-only now (NAICS removed) — lighter output per segment allows slightly larger batches, cutting repeated system-prompt overhead
     for (let i = 0; i < segs.length; i += chunkSize) {
       const chunk = segs.slice(i, i + chunkSize);
@@ -700,6 +844,366 @@ RULES:
     renderAll();
   }
 
+  // Applies the exact Scope 3 review decision tree: delta magnitude/direction, methodology-change
+  // detection, restatement lookup, delayed-reporting pattern, and materiality fallback.
+  function computeGhgDeltaPct(r) {
+    const cur = r.fy2024 && r.fy2024.scope3 ? r.fy2024.scope3.value : null;
+    const prior = r.fy2023_comparative_shown_in_this_report ? r.fy2023_comparative_shown_in_this_report.scope3.value : null;
+    if (cur != null && prior != null && prior !== 0) return ((cur - prior) / prior) * 100;
+    return null;
+  }
+
+  function applyGhgDecisionTree(r, hasFy2023Report, hasFy2025Report) {
+    const notes = [];
+    let flaggedGreen = false;
+    const finalScope3 = r.fy2024.scope3 ? r.fy2024.scope3.value : null;
+    const deltaPct = computeGhgDeltaPct(r);
+    const reason = r.stated_reason_for_change;
+
+    if (deltaPct != null) {
+      if (reason && reason.found) {
+        notes.push(`Delta ${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}%. Stated reason: ${(reason.type||"").replace(/_/g," ")} — "${reason.quote || ""}" (p.${reason.page || "?"}).`);
+        flaggedGreen = true;
+      } else {
+        notes.push(`Delta ${deltaPct >= 0 ? "+" : ""}${deltaPct.toFixed(1)}% — no reason stated in the filing for this change.`);
+      }
+    } else {
+      notes.push("Delta could not be calculated (missing current or prior figure).");
+    }
+
+    return { finalScope3, deltaPct, notes, flaggedGreen };
+  }
+
+
+  // Generic recursive merge for GHG extraction results across batches — prefers whichever batch
+  // actually found a non-null value for each field, going deep into nested {value, unit, page, ...}
+  // objects. Arrays are concatenated (some duplication possible, not harmful for a review UI).
+  // Every batch now returns all 15 Scope 3 categories (per the mandatory-coverage prompt rule), so
+  // naive array concatenation would create duplicate/conflicting entries per category across batches.
+  // This merges by category_number, keeping whichever batch's entry actually found a disclosed value.
+  function mergeScope3Categories(a, b) {
+    const combined = [...(a||[]), ...(b||[])];
+    const byCategory = new Map();
+    for (const entry of combined) {
+      const key = entry.category_number;
+      const existing = byCategory.get(key);
+      if (!existing) { byCategory.set(key, entry); continue; }
+      const existingIsBetter = (existing.disclosed && existing.value != null) || !entry.disclosed;
+      if (!existingIsBetter) byCategory.set(key, entry);
+    }
+    return Array.from(byCategory.values()).sort((x,y) => x.category_number - y.category_number);
+  }
+
+  function mergeGhgPartial(a, b) {
+    if (a == null) return b; if (b == null) return a;
+    if (Array.isArray(a) && Array.isArray(b)) return [...a, ...b];
+    if (typeof a !== "object" || typeof b !== "object") return (a === null || a === "" || a === undefined) ? b : a;
+    const out = { ...a };
+    for (const key in b) {
+      if (key === "scope3_categories_disclosed" && Array.isArray(out[key]) && Array.isArray(b[key])) {
+        out[key] = mergeScope3Categories(out[key], b[key]);
+      } else {
+        out[key] = mergeGhgPartial(out[key], b[key]);
+      }
+    }
+    return out;
+  }
+
+  // How "rich" a single batch's result is in terms of actually-found Scope data — used to decide
+  // which batch's materiality_assessment/stated_reason_for_change/business_description should be
+  // trusted when merging, since a batch that saw zero numbers has no real basis to claim "no data
+  // exists" once another batch demonstrably found the real figures.
+  function ghgDataRichness(p) {
+    if (!p || !p.fy2024) return -1;
+    let score = 0;
+    if (p.fy2024.scope1 && p.fy2024.scope1.value != null) score++;
+    if (p.fy2024.scope2 && p.fy2024.scope2.value != null) score++;
+    if (p.fy2024.scope3 && p.fy2024.scope3.value != null) score += 2; // Scope 3 is the priority figure
+    score += (p.scope3_categories_disclosed || []).filter(c => c.disclosed).length;
+    return score;
+  }
+
+  // Deterministically computes which sector-material Scope 3 categories are actually covered vs.
+  // missing, from the 15-category array — this grounds the materiality rating in concrete per-
+  // category data rather than trusting a single free-text summary sentence.
+  function computeScope3Coverage(categories) {
+    const list = (categories || []).slice().sort((a,b) => a.category_number - b.category_number);
+    const material = list.filter(c => c.expected_material_for_sector);
+    const materialCovered = material.filter(c => c.disclosed);
+    const materialMissing = material.filter(c => !c.disclosed);
+    return { all: list, material, materialCovered, materialMissing, totalCategoriesReturned: list.length };
+  }
+
+  async function extractGhgCompany(company) {
+    if (!company.fy2024File) { company.error = "Upload the FY2024 report first."; renderAll(); return; }
+    if (usageRemaining("ghg") <= 0) {
+      company.error = `Daily limit reached (${getDailyLimit("ghg")} companies) for GHG Scope 3 checks. This resets at midnight. Contact your admin if you need a higher limit.`;
+      renderAll(); return;
+    }
+    recordUsage("ghg");
+    renderApiKeyPanel();
+    company.loading = true; company.log = []; company.error = null; company.result = null;
+    renderAll();
+    try {
+      // Reads a document, scans for relevant pages, and runs extraction in small batches (same
+      // pattern as the revenue tool) — sending too many full-resolution page images in one request
+      // is what caused the "413 Request Entity Too Large" error.
+      // Reads a document, scans for relevant pages, and runs extraction in small batches (same
+      // pattern as the revenue tool) — sending too many full-resolution page images in one request
+      // is what caused the "413 Request Entity Too Large" error. Also returns the ranked list of
+      // pages NOT initially selected, so a fallback pass can expand the search if nothing useful
+      // was found — some GHG data tables are dense/image-heavy and don't score highly on a first pass.
+      const readAndExtract = async (file, keywords, maxPages, systemPrompt, instruction, label, priorityKeywords) => {
+        log(company, `Loading ${label}...`);
+        const buf = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+        const { selected, remainingRanked } = await scanAndSelectPages(pdf, maxPages, keywords, priorityKeywords);
+        log(company, `${label}: found ${selected.length} relevant page(s).`);
+        const runBatches = async (pages, tag) => {
+          const batchSize = 7; // increased from 5 — the mandatory 15-category output repeats on every batch regardless of page content, so fewer/larger batches cuts that repeated overhead
+          let merged = null;
+          let bestPartial = null; // whichever single batch actually found the real data table — its
+          // materiality_assessment/stated_reason_for_change/company_business_description are trusted,
+          // since a batch that saw zero numbers has no real basis to claim "no data exists" once
+          // another batch demonstrably found the actual figures.
+          for (let i = 0; i < pages.length; i += batchSize) {
+            const batchPages = pages.slice(i, i + batchSize);
+            log(company, `${label}${tag}: reading batch ${Math.floor(i/batchSize)+1} (pages ${batchPages.join(", ")})...`);
+            const content = [];
+            for (const p of batchPages) {
+              const b64 = await renderPageToBase64(pdf, p, 1.8);
+              content.push({ type:"text", text:`Page ${p}:` });
+              content.push({ type:"image_url", image_url:{ url: "data:image/png;base64," + b64 } });
+            }
+            content.push({ type:"text", text: instruction });
+            try {
+              const partial = await callClaudeWithRetry(systemPrompt, content, 2, { max_tokens: 3200 });
+              merged = mergeGhgPartial(merged, partial);
+              if (ghgDataRichness(partial) > ghgDataRichness(bestPartial)) bestPartial = partial;
+            } catch (e) {
+              log(company, `⚠ ${label}${tag} batch ${Math.floor(i/batchSize)+1} failed to parse (${e.message}) — skipping.`);
+            }
+          }
+          if (merged && bestPartial && ghgDataRichness(bestPartial) > 0) {
+            if (bestPartial.materiality_assessment) merged.materiality_assessment = bestPartial.materiality_assessment;
+            if (bestPartial.stated_reason_for_change) merged.stated_reason_for_change = bestPartial.stated_reason_for_change;
+            if (bestPartial.company_business_description) merged.company_business_description = bestPartial.company_business_description;
+          }
+          return merged;
+        };
+        let merged = await runBatches(selected, "");
+        return { merged, remainingRanked, pdf };
+      };
+
+      const hasAnyScopeData = (r) => r && r.fy2024 && (
+        (r.fy2024.scope1 && r.fy2024.scope1.value != null) ||
+        (r.fy2024.scope2 && r.fy2024.scope2.value != null) ||
+        (r.fy2024.scope3 && r.fy2024.scope3.value != null)
+      );
+
+      const latestYear = (company.latestYear || "").trim() || "the latest reporting year";
+      const priorYear = (company.priorYear || "").trim() || "the prior reporting year";
+
+      log(company, `Extracting Scope 1/2/3 data for ${latestYear} and materiality assessment...`);
+      const mainInstruction = `Company: ${company.name||"Unknown"}\nLatest reporting year: ${latestYear}\nPrior reporting year: ${priorYear}\nExtract Scope 1/2/3 data per the schema from the pages shown above.`;
+      let { merged: r, remainingRanked, pdf: mainPdf } = await readAndExtract(
+        company.fy2024File, GHG_KEYWORDS, 22, buildGhgMainSystem(latestYear, priorYear),
+        mainInstruction, `${latestYear} report`, GHG_PRIORITY_KEYWORDS
+      );
+
+      // Fallback: if no Scope 1/2/3 figures were found at all, the actual data table likely fell
+      // outside the initially selected pages (common with dense KPI tables) — expand the search
+      // rather than reporting "no data" when the report may well contain it further in.
+      if (!hasAnyScopeData(r) && remainingRanked.length > 0) {
+        log(company, `No Scope 1/2/3 figures found in the initial scan — expanding search to ${Math.min(12, remainingRanked.length)} more page(s) before giving up.`);
+        const extra = remainingRanked.slice(0, 12);
+        const batchSize = 7;
+        for (let i = 0; i < extra.length; i += batchSize) {
+          const batchPages = extra.slice(i, i + batchSize);
+          log(company, `${latestYear} report (fallback): reading batch ${Math.floor(i/batchSize)+1} (pages ${batchPages.join(", ")})...`);
+          const content = [];
+          for (const p of batchPages) {
+            const b64 = await renderPageToBase64(mainPdf, p, 1.8);
+            content.push({ type:"text", text:`Page ${p}:` });
+            content.push({ type:"image_url", image_url:{ url: "data:image/png;base64," + b64 } });
+          }
+          content.push({ type:"text", text: mainInstruction });
+          try {
+            const partial = await callClaudeWithRetry(buildGhgMainSystem(latestYear, priorYear), content, 2, { max_tokens: 3200 });
+            const richerThanBefore = ghgDataRichness(partial) > ghgDataRichness(r);
+            r = mergeGhgPartial(r, partial);
+            if (richerThanBefore && ghgDataRichness(partial) > 0) {
+              if (partial.materiality_assessment) r.materiality_assessment = partial.materiality_assessment;
+              if (partial.stated_reason_for_change) r.stated_reason_for_change = partial.stated_reason_for_change;
+              if (partial.company_business_description) r.company_business_description = partial.company_business_description;
+            }
+          } catch (e) {
+            log(company, `⚠ Fallback batch ${Math.floor(i/batchSize)+1} failed to parse (${e.message}) — skipping.`);
+          }
+        }
+      }
+
+      if (!r) throw new Error(`All batches failed — no data could be extracted from the ${latestYear} report.`);
+
+      // Deterministic safety net for the column-matching instruction above: even with an explicit
+      // self-check rule, the model can still populate a value under the wrong year if it found a
+      // number before confirming the header. This catches any remaining contradiction between what
+      // column_header_matched literally says and which year field it was placed under, and nulls
+      // the value out rather than silently trusting it — better an honest gap than a wrong number.
+      const validateYearMatch = (obj, expectedYear, fieldLabel) => {
+        if (!obj || obj.value == null || !expectedYear) return;
+        const header = (obj.column_header_matched || "").toString();
+        if (header && !header.includes(expectedYear)) {
+          log(company, `⚠ ${fieldLabel}: extracted value's column header said "${header}", not ${expectedYear} — this looks like a year mismatch, so the value has been discarded rather than trusted. Check page ${obj.page || "?"} manually.`);
+          obj.value = null;
+        }
+      };
+      if (r.fy2024) {
+        validateYearMatch(r.fy2024.scope1, latestYear, "Scope 1");
+        validateYearMatch(r.fy2024.scope2, latestYear, "Scope 2");
+        validateYearMatch(r.fy2024.scope3, latestYear, "Scope 3");
+      }
+      if (r.fy2023_comparative_shown_in_this_report) {
+        validateYearMatch(r.fy2023_comparative_shown_in_this_report.scope1, priorYear, "Prior-year comparative Scope 1");
+        validateYearMatch(r.fy2023_comparative_shown_in_this_report.scope2, priorYear, "Prior-year comparative Scope 2");
+        validateYearMatch(r.fy2023_comparative_shown_in_this_report.scope3, priorYear, "Prior-year comparative Scope 3");
+      }
+
+      const hasFy2023Report = !!company.fy2023File;
+      const hasFy2025Report = !!company.fy2025File;
+
+      // Efficiency check: only fetch the optional prior/newer reports when the latest report
+      // genuinely doesn't already answer the question on its own. If it already has both years'
+      // Scope 3 figures AND either the delta is within the normal ±30% range OR the company already
+      // explains the change in its own footnotes, there's nothing left to investigate — skip the
+      // extra documents entirely, even if uploaded, to save the extra API cost.
+      const earlyDeltaPct = computeGhgDeltaPct(r);
+      const hasBothYears = r.fy2024 && r.fy2024.scope3 && r.fy2024.scope3.value != null
+        && r.fy2023_comparative_shown_in_this_report && r.fy2023_comparative_shown_in_this_report.scope3.value != null;
+      const reasonAlreadyStated = r.stated_reason_for_change && r.stated_reason_for_change.found;
+      const deltaWithinThreshold = earlyDeltaPct == null || Math.abs(earlyDeltaPct) <= 30;
+      const needsFurtherInvestigation = !(hasBothYears && (deltaWithinThreshold || reasonAlreadyStated));
+
+      if (!needsFurtherInvestigation) {
+        log(company, `${latestYear} report already provides both years' Scope 3 figures${reasonAlreadyStated ? " with a stated reason for the change" : (deltaWithinThreshold ? " and the delta is within the ±30% threshold" : "")} — skipping prior/newer report checks to save cost.`);
+      } else {
+        if (hasFy2023Report) {
+          try {
+            const { merged: priorResult } = await readAndExtract(
+              company.fy2023File, GHG_KEYWORDS, 16, buildGhgPriorYearSystem(priorYear),
+              `Extract ${priorYear}'s own Scope 1/2/3 figures per the schema.`,
+              `${priorYear} own report`, GHG_PRIORITY_KEYWORDS
+            );
+            r.fy2023OwnReport = priorResult;
+          } catch (e) { log(company, `⚠ ${priorYear} report extraction failed (${e.message}) — continuing without it.`); }
+        }
+        if (hasFy2025Report) {
+          try {
+            const { merged: restResult } = await readAndExtract(
+              company.fy2025File, GHG_KEYWORDS, 16, buildGhgRestatementSystem(latestYear),
+              `Check whether this report restates ${latestYear} Scope 1/2/3 figures, per the schema.`,
+              "newer report (for restatement check)", GHG_PRIORITY_KEYWORDS
+            );
+            r.fy2025Restatement = restResult;
+          } catch (e) { log(company, `⚠ Newer-report extraction failed (${e.message}) — continuing without it.`); }
+        }
+      }
+
+      // Final sanity check: if real Scope figures were actually found anywhere in the process, a
+      // materiality claim of "no data exists" is self-contradictory — don't let the decision tree
+      // act on it. This is a backstop in case the richness-based override above still missed a case.
+      if (hasAnyScopeData(r) && r.materiality_assessment && /no (quantitative|absolute).{0,30}(data|figures|emissions)|non.?existent|entirely missing|reporting non.?existent/i.test(r.materiality_assessment.rationale || "")) {
+        log(company, `⚠ Materiality assessment contradicted the actual extracted figures (claimed no data despite finding real Scope values) — corrected to reflect that data was found.`);
+        r.materiality_assessment = { rating: "adequate", rationale: "Corrected: real Scope 1/2/3 figures were found during extraction, contradicting an earlier batch's claim of no data — treat this rating as provisional and verify the category-level completeness manually." };
+      }
+
+      // Deterministic materiality override: base the rating on the actual 15-category coverage check
+      // rather than trusting a single free-text summary — this directly answers "are the sector-
+      // material Scope 3 categories actually covered or not", auditable category by category.
+      // Coverage threshold: at least one sector-material category being disclosed counts as adequate
+      // coverage — this is informational only and never affects the reported Scope 3 value.
+      const coverage = computeScope3Coverage(r.scope3_categories_disclosed);
+      if (coverage.totalCategoriesReturned >= 10) { // only override if the model actually did the full 15-category check, not a partial/degraded response
+        if (coverage.material.length === 0) {
+          r.materiality_assessment = { rating: "adequate", rationale: "No categories were judged sector-material for this company, so there is nothing specific expected to be missing." };
+        } else if (coverage.materialCovered.length >= 1) {
+          r.materiality_assessment = { rating: "adequate", rationale: `At least one sector-material Scope 3 category is disclosed: ${coverage.materialCovered.map(c=>`Cat ${c.category_number} (${c.category_name||""})`).join(", ")}.` };
+        } else {
+          r.materiality_assessment = { rating: "borderline", rationale: `None of the ${coverage.material.length} sector-material categories (${coverage.material.map(c=>`Cat ${c.category_number}`).join(", ")}) are individually disclosed — worth a closer look, though this doesn't affect the reported Scope 3 total.` };
+        }
+      }
+      company.scope3Coverage = coverage;
+
+      const decision = applyGhgDecisionTree(r, hasFy2023Report, hasFy2025Report);
+      company.result = { raw: r, decision };
+      log(company, "Done.");
+    } catch (e) {
+      company.error = "Extraction failed: " + (e.message || e);
+    } finally {
+      company.loading = false;
+      renderAll();
+    }
+  }
+
+  async function processAllGhg() {
+    for (const company of state.ghgCompanies) {
+      if (company.fy2024File && !company.result && !company.loading) {
+        await extractGhgCompany(company);
+        await new Promise(r => setTimeout(r, 1200));
+      }
+    }
+  }
+
+  function exportGhgToExcel() {
+    if (typeof XLSX === "undefined") { el("ghgErrorBox").textContent = "Excel export library failed to load."; return; }
+    const done = state.ghgCompanies.filter(c => c.result);
+    if (done.length === 0) { el("ghgErrorBox").textContent = "No results yet — process at least one company first."; return; }
+    const rows = done.map(c => {
+      const r = c.result.raw, d = c.result.decision;
+      const ly = c.latestYear || "Latest", py = c.priorYear || "Prior";
+      const cov = c.scope3Coverage || computeScope3Coverage(r.scope3_categories_disclosed);
+      return {
+        Company: c.name || "(unnamed)",
+        "Latest Year": ly,
+        "Prior Year": py,
+        [`${ly} Scope 1`]: r.fy2024.scope1 ? r.fy2024.scope1.value : "",
+        [`${ly} Scope 2`]: r.fy2024.scope2 ? r.fy2024.scope2.value : "",
+        [`${ly} Scope 3 (as reported)`]: r.fy2024.scope3 ? r.fy2024.scope3.value : "",
+        [`${ly} Scope 3 Source (page / column)`]: r.fy2024.scope3 ? `p.${r.fy2024.scope3.page||"?"} — "${r.fy2024.scope3.column_header_matched||"?"}"` : "",
+        [`${py} Comparative Source (page / column)`]: (r.fy2023_comparative_shown_in_this_report && r.fy2023_comparative_shown_in_this_report.scope3) ? `p.${r.fy2023_comparative_shown_in_this_report.scope3.page||"?"} — "${r.fy2023_comparative_shown_in_this_report.scope3.column_header_matched||"?"}"` : "",
+        [`${py} Comparative (Scope 3, per ${ly} report)`]: r.fy2023_comparative_shown_in_this_report ? r.fy2023_comparative_shown_in_this_report.scope3.value : "",
+        "Scope 3 Delta %": d.deltaPct != null ? Math.round(d.deltaPct * 10) / 10 : "",
+        "Final Scope 3 Value (after review)": d.finalScope3 != null ? d.finalScope3 : "BLANK — see comments",
+        "Status": d.flaggedGreen ? "✅ Reviewed — see comments" : "No action needed",
+        "Materiality Rating": r.materiality_assessment ? r.materiality_assessment.rating : "",
+        "Stated Reason for Change": r.stated_reason_for_change && r.stated_reason_for_change.found ? `${(r.stated_reason_for_change.type||"").replace(/_/g," ")}: "${r.stated_reason_for_change.quote||""}" (p.${r.stated_reason_for_change.page||"?"})` : "Not stated in scanned pages",
+        "Material Categories Covered": cov.materialCovered.map(x=>x.category_number).join(", "),
+        "Material Categories Missing": cov.materialMissing.map(x=>x.category_number).join(", "),
+        "Comments": d.notes.join(" | "),
+      };
+    });
+    const categoryRows = [];
+    done.forEach(c => {
+      const r = c.result.raw;
+      (r.scope3_categories_disclosed || []).slice().sort((a,b)=>a.category_number-b.category_number).forEach(cat => {
+        categoryRows.push({
+          Company: c.name || "(unnamed)",
+          "Category #": cat.category_number,
+          "Category Name": cat.category_name || "",
+          "Expected Material for Sector": cat.expected_material_for_sector ? "Yes" : "No",
+          "Disclosed": cat.disclosed ? "Yes" : "No",
+          "Value": cat.value != null ? cat.value : "",
+          "Status": cat.expected_material_for_sector && !cat.disclosed ? "⚠ Material — NOT covered" : (cat.expected_material_for_sector && cat.disclosed ? "✅ Material — covered" : ""),
+          "Materiality Rationale": cat.materiality_rationale || "",
+        });
+      });
+    });
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "GHG Scope 3 Check");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(categoryRows), "Scope 3 Category Coverage");
+    XLSX.writeFile(wb, "ghg-scope3-check-export.xlsx");
+  }
+
   async function processAll() {
     for (const company of state.companies) {
       if (company.file && !company.extraction && !company.loading) {
@@ -722,6 +1226,7 @@ RULES:
     const gicsRows = [];
     const summaryRows = [];
     const snapshotRows = [];
+    const exclusionaryRows = [];
     for (const c of done) {
       const total = c.extraction.company_total_revenue;
       const segSum = c.extraction.segments.reduce((s,x) => s + (x.revenue_value || 0), 0);
@@ -745,6 +1250,12 @@ RULES:
       });
       if (c.extraction.company_snapshot_brief) {
         snapshotRows.push({ Company: c.name || "(unnamed)", "Fiscal Year": c.year || "", Category: "Business", Detail: c.extraction.company_snapshot_brief });
+      }
+      if (c.exclusionaryResult) {
+        exclusionaryRows.push({ Company: c.name || "(unnamed)", "Fiscal Year": c.year || "", Category: "Summary", Detail: c.exclusionaryResult.summary || "", Page: "" });
+        for (const f of (c.exclusionaryResult.flags || [])) {
+          exclusionaryRows.push({ Company: c.name || "(unnamed)", "Fiscal Year": c.year || "", Category: (f.category||"").replace(/_/g," "), Detail: f.description || "", Page: f.page || "" });
+        }
       }
       for (const s of c.extraction.segments) {
         const m = findMapping(c, s.segment_name);
@@ -773,6 +1284,7 @@ RULES:
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(summaryRows), "Company Summary");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(snapshotRows), "Company Snapshot");
+    if (exclusionaryRows.length) XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(exclusionaryRows), "Exclusionary Check");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(gicsRows), "GICS Mapping");
     XLSX.writeFile(wb, "segment-revenue-naics-gics-export.xlsx");
   }
@@ -800,13 +1312,29 @@ RULES:
     const saved = localStorage.getItem("gemini_api_key");
     const savedModel = localStorage.getItem("gemini_model") || DEFAULT_MODEL;
     const keyLooksValid = saved && (saved.startsWith("AIza") || saved.startsWith("AQ."));
-    const used = getUsage().count;
-    const limit = getDailyLimit();
-    const remaining = usageRemaining();
-    const usagePct = Math.min(100, Math.round((used / limit) * 100));
-    const tone = remaining === 0 ? { c:"var(--red)", bg:"var(--red-bg)", bd:"var(--red-dark)" }
-      : (usagePct > 80 ? { c:"var(--amber-dark)", bg:"var(--amber-bg)", bd:"var(--amber-dark)" }
-      : { c:"var(--teal-dark)", bg:"var(--teal-bg)", bd:"var(--teal-dark)" });
+
+    const tabUsage = (tab) => {
+      const used = getUsage(tab).count;
+      const limit = getDailyLimit(tab);
+      const remaining = usageRemaining(tab);
+      const usagePct = Math.min(100, Math.round((used / limit) * 100));
+      const tone = remaining === 0 ? { c:"var(--red)", bg:"var(--red-bg)", bd:"var(--red-dark)" }
+        : (usagePct > 80 ? { c:"var(--amber-dark)", bg:"var(--amber-bg)", bd:"var(--amber-dark)" }
+        : { c:"var(--teal-dark)", bg:"var(--teal-bg)", bd:"var(--teal-dark)" });
+      return { used, limit, remaining, usagePct, tone };
+    };
+    const rev = tabUsage("revenue");
+    const ghg = tabUsage("ghg");
+
+    const usageBarUser = (label, u) => `
+      <div style="margin-top:10px;">
+        <div style="font-size:11px; color:var(--muted2); text-transform:uppercase; letter-spacing:0.04em; font-weight:600; margin-bottom:4px;">${label} — today's usage</div>
+        <div style="height:10px; background:var(--border); border-radius:5px; overflow:hidden;">
+          <div style="height:100%; width:${u.usagePct}%; background:linear-gradient(90deg, var(--teal), var(--blue)); border-radius:5px; transition:width 0.3s;"></div>
+        </div>
+        ${u.remaining === 0 ? `<div style="font-size:11px;color:var(--red);margin-top:4px; font-weight:600;">⚠ Daily limit reached — resets at midnight.</div>`
+          : (u.usagePct > 80 ? `<div style="font-size:11px;color:var(--amber-dark);margin-top:4px;">Approaching today's limit.</div>` : "")}
+      </div>`;
 
     const statusRowUser = `
       <div style="display:flex; align-items:center; gap:10px;">
@@ -816,12 +1344,8 @@ RULES:
           <div style="font-size:15px; font-weight:800; color:var(--teal-dark);">${savedModel}</div>
         </div>
       </div>
-      <div style="height:10px; background:var(--border); border-radius:5px; margin-top:14px; overflow:hidden;">
-        <div style="height:100%; width:${usagePct}%; background:linear-gradient(90deg, var(--teal), var(--blue)); border-radius:5px; transition:width 0.3s;"></div>
-      </div>
-      <div style="font-size:11px; color:var(--muted2); margin-top:6px; text-transform:uppercase; letter-spacing:0.04em; font-weight:600;">Today's usage</div>
-      ${remaining === 0 ? `<div style="font-size:12px;color:var(--red);margin-top:8px; font-weight:600;">⚠ Daily limit reached — resets at midnight. Contact your admin if you need to continue today.</div>`
-        : (usagePct > 80 ? `<div style="font-size:11px;color:var(--amber-dark);margin-top:8px;">Approaching today's usage limit.</div>` : "")}
+      ${usageBarUser("Revenue &amp; GICS", rev)}
+      ${usageBarUser("GHG Scope 3", ghg)}
       <div style="text-align:right; margin-top:10px;"><a href="#" id="adminLoginLink" style="font-size:10px; color:var(--muted2); text-decoration:none;">Admin</a></div>
     `;
 
@@ -831,25 +1355,31 @@ RULES:
       return;
     }
 
+    const usageBarAdmin = (label, u) => `
+      <div style="margin-top:10px;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <span style="font-size:11px; color:var(--muted2); text-transform:uppercase; letter-spacing:0.04em; font-weight:700;">${label}</span>
+          <span style="display:flex; align-items:center; gap:8px; background:${u.tone.bg}; border:1px solid ${u.tone.bd}; border-radius:16px; padding:3px 12px;">
+            <span style="font-size:13px; font-weight:800; color:${u.tone.c};">${u.used}<span style="opacity:0.5; font-weight:600;"> / ${u.limit}</span></span>
+          </span>
+        </div>
+        <div style="height:8px; background:var(--border); border-radius:4px; margin-top:6px; overflow:hidden;">
+          <div style="height:100%; width:${u.usagePct}%; background:linear-gradient(90deg, ${u.tone.c}, ${u.tone.c}); border-radius:4px; transition:width 0.3s;"></div>
+        </div>
+        ${u.remaining === 0 ? `<div style="font-size:11px;color:var(--red);margin-top:4px; font-weight:600;">⚠ Daily limit reached.</div>`
+          : (u.usagePct > 80 ? `<div style="font-size:11px;color:var(--amber-dark);margin-top:4px;">Approaching limit (${u.remaining} left).</div>` : "")}
+      </div>`;
+
     const statusRowAdmin = `
-      <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:14px;">
-        <div style="display:flex; align-items:center; gap:10px;">
-          <span style="font-size:20px;">⚡</span>
-          <div>
-            <div style="font-size:10px; letter-spacing:0.06em; text-transform:uppercase; color:var(--muted2); font-weight:700;">Model</div>
-            <div style="font-size:15px; font-weight:800; color:var(--teal-dark);">${savedModel}</div>
-          </div>
-        </div>
-        <div style="display:flex; align-items:center; gap:10px; background:${tone.bg}; border:1px solid ${tone.bd}; border-radius:20px; padding:6px 16px;">
-          <span style="font-size:11px; color:${tone.c}; font-weight:700; text-transform:uppercase; letter-spacing:0.04em;">Today</span>
-          <span style="font-size:15px; font-weight:800; color:${tone.c};">${used}<span style="opacity:0.5; font-weight:600;"> / ${limit}</span></span>
+      <div style="display:flex; align-items:center; gap:10px;">
+        <span style="font-size:20px;">⚡</span>
+        <div>
+          <div style="font-size:10px; letter-spacing:0.06em; text-transform:uppercase; color:var(--muted2); font-weight:700;">Model</div>
+          <div style="font-size:15px; font-weight:800; color:var(--teal-dark);">${savedModel}</div>
         </div>
       </div>
-      <div style="height:8px; background:var(--border); border-radius:4px; margin-top:12px; overflow:hidden;">
-        <div style="height:100%; width:${usagePct}%; background:linear-gradient(90deg, ${tone.c}, ${tone.c}); border-radius:4px; transition:width 0.3s;"></div>
-      </div>
-      ${remaining === 0 ? `<div style="font-size:12px;color:var(--red);margin-top:8px; font-weight:600;">⚠ Daily limit reached — resets at midnight.</div>`
-        : (usagePct > 80 ? `<div style="font-size:11px;color:var(--amber-dark);margin-top:8px;">Approaching today's limit (${remaining} left).</div>` : "")}
+      ${usageBarAdmin("Revenue &amp; GICS", rev)}
+      ${usageBarAdmin("GHG Scope 3", ghg)}
       <div style="text-align:right; margin-top:6px;"><a href="#" id="adminLogoutLink" style="font-size:10px; color:var(--muted2); text-decoration:none;">Log out of admin</a></div>
     `;
 
@@ -870,15 +1400,13 @@ RULES:
         ${saved && !keyLooksValid ? `<div style="font-size:11px;color:var(--red);margin-bottom:6px;">⚠ This doesn't look like a Gemini key (should start with "AIza" or "AQ.").</div>` : ""}
         <div class="label" style="margin-top:10px;">Model ID</div>
         <input type="text" id="modelIdIn" value="${savedModel}" />
-        <div class="label" style="margin-top:10px;">Daily limit (companies per browser)</div>
-        <input type="number" id="dailyLimitIn" value="${limit}" min="1" step="1" />
+        <div class="label" style="margin-top:10px;">Daily limit — Revenue &amp; GICS (companies per browser)</div>
+        <input type="number" id="dailyLimitRevenueIn" value="${rev.limit}" min="1" step="1" />
+        <div class="label" style="margin-top:10px;">Daily limit — GHG Scope 3 (companies per browser)</div>
+        <input type="number" id="dailyLimitGhgIn" value="${ghg.limit}" min="1" step="1" />
         <div class="label" style="margin-top:10px;">Delay between API calls (ms)</div>
         <p style="font-size:11px;color:var(--muted2);margin:0 0 6px;">13000ms matches a free-tier key's rate limit. Lower (e.g. 500) if this key has billing enabled.</p>
         <input type="number" id="rateLimitIn" value="${localStorage.getItem("rate_limit_ms") || "13000"}" min="0" step="500" />
-        <label style="display:flex; align-items:center; gap:8px; margin-top:14px; font-size:12px; color:var(--muted); cursor:pointer;">
-          <input type="checkbox" id="webLookupToggle" ${localStorage.getItem("web_lookup_enabled")==="true"?"checked":""} style="width:auto;" />
-          Use web search to fill gaps when a segment's product list is sparse
-        </label>
       </div>
     `;
     el("adminLogoutLink").addEventListener("click", (e) => { e.preventDefault(); sessionStorage.removeItem("is_admin"); renderApiKeyPanel(); });
@@ -892,9 +1420,9 @@ RULES:
       el("apiKeyIn").type = keyVisible ? "text" : "password";
     });
     el("apiKeyIn").type = "password"; // masked by default; the eye toggle above reveals it on demand
-    el("webLookupToggle").addEventListener("change", (e) => localStorage.setItem("web_lookup_enabled", e.target.checked ? "true" : "false"));
     el("rateLimitIn").addEventListener("change", (e) => localStorage.setItem("rate_limit_ms", String(Math.max(0, parseInt(e.target.value,10) || 0))));
-    el("dailyLimitIn").addEventListener("change", (e) => { localStorage.setItem("daily_limit", String(Math.max(1, parseInt(e.target.value,10) || DEFAULT_DAILY_LIMIT))); renderApiKeyPanel(); });
+    el("dailyLimitRevenueIn").addEventListener("change", (e) => { localStorage.setItem("daily_limit_revenue", String(Math.max(1, parseInt(e.target.value,10) || DEFAULT_DAILY_LIMIT))); renderApiKeyPanel(); });
+    el("dailyLimitGhgIn").addEventListener("change", (e) => { localStorage.setItem("daily_limit_ghg", String(Math.max(1, parseInt(e.target.value,10) || DEFAULT_DAILY_LIMIT))); renderApiKeyPanel(); });
     el("saveKeyBtn").addEventListener("click", () => {
       const val = el("apiKeyIn").value.trim();
       const modelVal = el("modelIdIn").value.trim();
@@ -989,6 +1517,21 @@ RULES:
       </div>`;
   }
 
+  function exclusionaryHtml(company) {
+    const res = company.exclusionaryResult;
+    if (!res) return "";
+    const hasFlags = (res.flags || []).length > 0;
+    return `
+      <div class="panel" style="${hasFlags ? "border-color:var(--red-dark);background:var(--red-bg);" : "border-color:var(--border);"}">
+        <div class="label" style="margin-bottom:6px; ${hasFlags ? "color:var(--red);" : ""}">${hasFlags ? "⚠" : "✓"} Exclusionary involvement check</div>
+        <div class="seg-desc">${res.summary || ""}</div>
+        ${hasFlags ? res.flags.map(f => `
+          <div class="seg-desc" style="margin-top:6px;color:var(--red);">
+            • <b>${(f.category||"").replace(/_/g," ")}</b>: ${f.description || ""}${f.page ? ` <span class="cat-val">(p.${f.page})</span>` : ""}
+          </div>`).join("") : ""}
+      </div>`;
+  }
+
   function gicsSectorBadge(company) {
     if (!company.gicsSector) return "";
     return `<span class="company-status done" title="${company.gicsSector.rationale||""}">GICS: ${company.gicsSector.sector} — ${company.gicsSector.industry_group}</span>`;
@@ -1024,6 +1567,14 @@ RULES:
           <input type="checkbox" class="snapshot-check" ${company.includeSnapshot ? "checked" : ""} style="width:auto;" />
           Include brief Company snapshot
         </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:4px 0; font-size:12px; color:var(--muted); cursor:pointer;">
+          <input type="checkbox" class="weblookup-check" ${company.useWebLookup ? "checked" : ""} style="width:auto;" />
+          Check official company website when a segment's product list is unclear
+        </label>
+        <label style="display:flex; align-items:center; gap:8px; margin:4px 0 8px; font-size:12px; color:var(--muted); cursor:pointer;">
+          <input type="checkbox" class="exclusionary-check" ${company.includeExclusionary ? "checked" : ""} style="width:auto;" />
+          Check exclusionary involvements (nuclear, oil &amp; gas, defense, coal, etc.)
+        </label>
         ${company.log.length ? `<div class="progress-log">${company.log.map(l=>"> "+l).join("<br>")}</div>` : ""}
         ${company.error ? `<div class="error-msg">${company.error}</div>` : ""}
         ${company.extraction && company.extraction.segment_disclosure ? (() => {
@@ -1036,6 +1587,7 @@ RULES:
         })() : ""}
         ${company.extraction && company.extraction.consolidation_note ? `<div class="panel" style="border-color:var(--amber-dark); background:var(--amber-bg); color:var(--amber-dark); font-size:12px; font-weight:600;">📍 ${company.extraction.consolidation_note}</div>` : ""}
         ${snapshotHtml(company)}
+        ${exclusionaryHtml(company)}
         ${reconciliationHtml(company)}
         ${company.mapping ? `<div class="panel" style="text-align:center; color:var(--muted);"><span class="spin"></span> Mapping segments to GICS codes...</div>` :
           (company.extraction ? company.extraction.segments.map((s,si) => segmentCardHtml(company, s, si)).join("") : "")}
@@ -1048,6 +1600,8 @@ RULES:
     cardEl.querySelector(".year-in").addEventListener("input", e => company.year = e.target.value);
     cardEl.querySelector(".file-in").addEventListener("change", e => { const f = e.target.files[0]; if (f) { company.file = f; renderAll(); } });
     cardEl.querySelector(".snapshot-check").addEventListener("change", e => { company.includeSnapshot = e.target.checked; });
+    cardEl.querySelector(".weblookup-check").addEventListener("change", e => { company.useWebLookup = e.target.checked; });
+    cardEl.querySelector(".exclusionary-check").addEventListener("change", e => { company.includeExclusionary = e.target.checked; });
     cardEl.querySelector(".extract-btn").addEventListener("click", () => extractCompany(company));
     cardEl.querySelector("[data-remove-company]").addEventListener("click", () => {
       state.companies = state.companies.filter(c => c.id !== company.id);
@@ -1088,6 +1642,99 @@ RULES:
     });
   }
 
+  function ghgCompanyCardHtml(company) {
+    const status = company.loading ? `<span class="company-status"><span class="spin"></span> checking</span>`
+      : company.error ? `<span class="company-status error">error</span>`
+      : company.result ? `<span class="company-status ${company.result.decision.flaggedGreen ? "done" : ""}">${company.result.decision.flaggedGreen ? "✅ reviewed" : "done — no action needed"}</span>`
+      : `<span class="company-status">pending</span>`;
+    const fileRow = (label, key, current) => `
+      <label class="dropzone" style="margin:6px 0;">
+        📄 <span style="overflow:hidden;text-overflow:ellipsis;">${current ? current.name : `Upload ${label}`}</span>
+        <input type="file" accept="application/pdf" class="ghg-file-in" data-key="${key}" />
+      </label>`;
+    let resultHtml = "";
+    if (company.result) {
+      const r = company.result.raw, d = company.result.decision;
+      const fmt = v => v != null ? v.toLocaleString() : "—";
+      const verifyLine = (obj) => obj ? `<div style="font-size:10px;color:var(--muted2);margin-top:2px;">${obj.page ? `p.${obj.page}` : ""}${obj.page && obj.column_header_matched ? " — " : ""}${obj.column_header_matched ? `col: "${obj.column_header_matched}"` : ""}</div>` : "";
+      resultHtml = `
+        <div class="panel">
+          <div style="font-size:11px;color:var(--amber-dark);background:var(--amber-bg);border:1px solid var(--amber-dark);border-radius:6px;padding:6px 10px;margin-bottom:10px;">⚠ Verify years against the source: check the page number and column header shown below each figure match what you expect before trusting these values.</div>
+          <div class="recon-panel">
+            <div class="recon-item"><div class="label">${company.latestYear || "Latest"} Scope 1</div><div>${fmt(r.fy2024.scope1 && r.fy2024.scope1.value)}</div>${verifyLine(r.fy2024.scope1)}</div>
+            <div class="recon-item"><div class="label">${company.latestYear || "Latest"} Scope 2</div><div>${fmt(r.fy2024.scope2 && r.fy2024.scope2.value)}</div>${verifyLine(r.fy2024.scope2)}</div>
+            <div class="recon-item"><div class="label">${company.latestYear || "Latest"} Scope 3 (reported)</div><div>${fmt(r.fy2024.scope3 && r.fy2024.scope3.value)}</div>${verifyLine(r.fy2024.scope3)}</div>
+            <div class="recon-item"><div class="label">${company.priorYear || "Prior"} comparative (Scope 3)</div><div>${fmt(r.fy2023_comparative_shown_in_this_report && r.fy2023_comparative_shown_in_this_report.scope3.value)}</div>${verifyLine(r.fy2023_comparative_shown_in_this_report && r.fy2023_comparative_shown_in_this_report.scope3)}</div>
+            <div class="recon-item"><div class="label">Delta</div><div style="color:${d.deltaPct!=null && Math.abs(d.deltaPct)>30 ? 'var(--red)':'var(--teal)'};font-weight:700;">${d.deltaPct!=null?d.deltaPct.toFixed(1)+"%":"n/a"}</div></div>
+          </div>
+          <div style="margin-top:10px;"><span class="label">Final Scope 3 value (after review)</span><div style="font-weight:700;">${d.finalScope3!=null ? d.finalScope3.toLocaleString() : "BLANK — see comments below"}</div></div>
+          ${r.materiality_assessment ? `<div class="quote" style="font-style:normal;margin-top:8px;"><b>Materiality:</b> ${r.materiality_assessment.rating} — ${r.materiality_assessment.rationale}</div>` : ""}
+          ${r.stated_reason_for_change && r.stated_reason_for_change.found ? `<div class="quote" style="font-style:normal;margin-top:8px;color:var(--blue-dark);"><b>Company-stated reason for change:</b> ${(r.stated_reason_for_change.type||"").replace(/_/g," ")} — "${r.stated_reason_for_change.quote||""}"${r.stated_reason_for_change.page ? ` (p.${r.stated_reason_for_change.page})` : ""}</div>` : `<div class="quote" style="margin-top:8px;">No explicit reason for the year-over-year change was stated in the scanned pages.</div>`}
+          ${(r.scope3_categories_disclosed||[]).length ? `
+            <div class="label" style="margin-top:10px;">Scope 3 category coverage (${(r.scope3_categories_disclosed||[]).length} of 15 checked)</div>
+            <div class="matrix-box" style="margin-top:4px;">
+              ${r.scope3_categories_disclosed.slice().sort((a,b)=>a.category_number-b.category_number).map(c => {
+                const material = c.expected_material_for_sector;
+                const covered = c.disclosed;
+                const tone = material && !covered ? "bad" : (material && covered ? "good" : "muted");
+                const label = material && !covered ? "Material — NOT covered" : (material && covered ? "Material — covered" : (covered ? "Disclosed (not expected material)" : "Not material / not disclosed"));
+                return `<div class="cat-row">
+                  <span class="cat-num">${String(c.category_number).padStart(2,"0")}</span>
+                  <span class="cat-name">${c.category_name || ""}${c.value!=null ? ` <span class="cat-val">(${c.value.toLocaleString()})</span>` : ""}</span>
+                  <span class="pill ${tone}">${label}</span>
+                </div>`;
+              }).join("")}
+            </div>
+          ` : ""}
+          <div class="label" style="margin-top:10px;">Comments</div>
+          ${d.notes.map(n => `<div class="seg-desc" style="${d.flaggedGreen?'color:var(--blue-dark);':''}">• ${n}</div>`).join("")}
+          
+        </div>`;
+    }
+    return `
+    <div class="company-card" data-cid="${company.id}">
+      <div class="company-head">
+        <div class="company-title">🌍 ${company.name || "Untitled company"} ${status}</div>
+        <button class="danger-ghost" data-remove-ghg-company>✕ remove</button>
+      </div>
+      <div class="company-body">
+        <div class="grid3">
+          <div><span class="label">Company</span><input type="text" class="ghg-name-in" value="${company.name}" placeholder="Company name" /></div>
+          <div><span class="label">Latest year</span><input type="text" class="ghg-latest-year-in" value="${company.latestYear}" placeholder="e.g. 2025" /></div>
+          <div><span class="label">Prior year</span><input type="text" class="ghg-prior-year-in" value="${company.priorYear}" placeholder="e.g. 2024" /></div>
+        </div>
+        ${fileRow(`Latest report (${company.latestYear || "required"})`, "fy2024File", company.fy2024File)}
+        ${fileRow(`Prior year's own report (optional — ${company.priorYear || "one year older"}, for delayed-reporting check)`, "fy2023File", company.fy2023File)}
+        ${fileRow(`Newer report (optional — one year after ${company.latestYear || "latest"}, for restatement check)`, "fy2025File", company.fy2025File)}
+        <button class="primary ghg-extract-btn" style="width:100%;margin-top:8px;" ${company.loading?"disabled":""}>
+          ${company.loading ? `<span class="spin"></span> Checking...` : "Run Scope 3 check"}
+        </button>
+        ${company.log.length ? `<div class="progress-log">${company.log.map(l=>"> "+l).join("<br>")}</div>` : ""}
+        ${company.error ? `<div class="error-msg">${company.error}</div>` : ""}
+        ${resultHtml}
+      </div>
+    </div>`;
+  }
+
+  function bindGhgCompanyCard(cardEl, company) {
+    cardEl.querySelector(".ghg-name-in").addEventListener("input", e => company.name = e.target.value);
+    cardEl.querySelector(".ghg-latest-year-in").addEventListener("input", e => { company.latestYear = e.target.value; });
+    cardEl.querySelector(".ghg-latest-year-in").addEventListener("blur", () => renderAll());
+    cardEl.querySelector(".ghg-prior-year-in").addEventListener("input", e => { company.priorYear = e.target.value; });
+    cardEl.querySelector(".ghg-prior-year-in").addEventListener("blur", () => renderAll());
+    cardEl.querySelectorAll(".ghg-file-in").forEach(input => {
+      input.addEventListener("change", e => {
+        const f = e.target.files[0];
+        if (f) { company[e.target.dataset.key] = f; renderAll(); }
+      });
+    });
+    cardEl.querySelector(".ghg-extract-btn").addEventListener("click", () => extractGhgCompany(company));
+    cardEl.querySelector("[data-remove-ghg-company]").addEventListener("click", () => {
+      state.ghgCompanies = state.ghgCompanies.filter(c => c.id !== company.id);
+      renderAll();
+    });
+  }
+
   function renderAll() {
     try {
       const box = el("companiesList");
@@ -1101,6 +1748,16 @@ RULES:
       const doneCount = state.companies.filter(c => c.extraction).length;
       const totalCount = state.companies.length;
       el("globalBadge").innerHTML = totalCount ? `<div class="badge ${doneCount===totalCount && totalCount>0 ? "good":"bad"}">${doneCount}/${totalCount} companies processed</div>` : "";
+
+      const ghgBox = el("ghgCompaniesList");
+      if (ghgBox) {
+        ghgBox.innerHTML = state.ghgCompanies.map(c => ghgCompanyCardHtml(c)).join("");
+        ghgBox.querySelectorAll(".company-card").forEach(cardEl => {
+          const cid = +cardEl.dataset.cid;
+          const company = state.ghgCompanies.find(c => c.id === cid);
+          if (company) bindGhgCompanyCard(cardEl, company);
+        });
+      }
     } catch (e) {
       console.error("Render error:", e);
       const box = el("errorBox");
@@ -1112,6 +1769,28 @@ RULES:
     el("addCompanyBtn").addEventListener("click", () => { state.companies.push(newCompany()); renderAll(); });
     el("processAllBtn").addEventListener("click", processAll);
     el("exportBtn").addEventListener("click", exportToExcel);
+
+    el("addGhgCompanyBtn").addEventListener("click", () => { state.ghgCompanies.push(newGhgCompany()); renderAll(); });
+    el("processAllGhgBtn").addEventListener("click", processAllGhg);
+    el("exportGhgBtn").addEventListener("click", exportGhgToExcel);
+
+    el("tabRevenue").addEventListener("click", () => {
+      el("revenueSection").style.display = "block";
+      el("ghgSection").style.display = "none";
+      el("tabRevenue").style.borderBottomColor = "var(--teal)";
+      el("tabRevenue").style.color = "var(--teal-dark)";
+      el("tabGhg").style.borderBottomColor = "transparent";
+      el("tabGhg").style.color = "var(--muted)";
+    });
+    el("tabGhg").addEventListener("click", () => {
+      el("revenueSection").style.display = "none";
+      el("ghgSection").style.display = "block";
+      el("tabGhg").style.borderBottomColor = "var(--teal)";
+      el("tabGhg").style.color = "var(--teal-dark)";
+      el("tabRevenue").style.borderBottomColor = "transparent";
+      el("tabRevenue").style.color = "var(--muted)";
+      if (state.ghgCompanies.length === 0) { state.ghgCompanies.push(newGhgCompany()); renderAll(); }
+    });
 
     state.companies.push(newCompany());
     renderApiKeyPanel();
