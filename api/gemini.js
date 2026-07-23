@@ -2,14 +2,17 @@
 // environment variable — never exposed to the browser.
 //
 // Security layers, in order of enforcement:
-// 1. Origin check — rejects requests from browser pages on other domains.
-// 2. Shared access code — rejects any request missing the correct X-Access-Code header.
-// 3. Server-side daily limit per user-id — via Upstash Redis's REST API (no SDK/package needed,
+// 1. Shared access code — rejects any request missing the correct X-Access-Code header.
+// 2. Server-side daily limit per user-id — via Upstash Redis's REST API (no SDK/package needed,
 //    just plain fetch calls). If Upstash isn't configured yet, this step is skipped (fails open)
 //    rather than blocking all usage.
+//
+// Note: an origin check (rejecting requests from other domains) was removed — it caused false-
+// positive rejections in practice (Vercel preview URLs, proxy/redirect quirks affecting the Origin
+// header) and was the lowest-value layer anyway. The access code + login gate + daily limit are
+// what actually matter for this use case.
 
 const ACCESS_CODE = process.env.ACCESS_CODE;
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN;
 const DAILY_LIMIT_PER_USER = parseInt(process.env.DAILY_LIMIT_PER_USER || "10", 10);
 const UPSTASH_URL = process.env.UPSTASH_REDIS_REST_URL;
 const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
@@ -36,21 +39,14 @@ export default async function handler(req, res) {
     return;
   }
 
-  // --- Layer 1: Origin check ---
-  const origin = req.headers.origin || req.headers.referer || "";
-  if (ALLOWED_ORIGIN && origin && !origin.startsWith(ALLOWED_ORIGIN)) {
-    res.status(403).json({ error: { message: "Requests from this origin are not allowed." } });
-    return;
-  }
-
-  // --- Layer 2: shared access code ---
+  // --- Layer 1: shared access code ---
   const providedCode = req.headers["x-access-code"];
   if (ACCESS_CODE && providedCode !== ACCESS_CODE) {
     res.status(401).json({ error: { message: "Missing or invalid access code." } });
     return;
   }
 
-  // --- Layer 3: server-side daily limit, keyed by the user-id the frontend sends ---
+  // --- Layer 2: server-side daily limit, keyed by the user-id the frontend sends ---
   const userId = (req.headers["x-user-id"] || "unknown").toString().slice(0, 100);
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
